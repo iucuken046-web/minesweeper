@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сапёр</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: "Geist", system-ui, sans-serif;
+    background: #101218;
+    color: #f2f4fb;
+    --accent: #d6fa86;
+    --muted: #a8afc0;
+    --line: #333846;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100svh; background: radial-gradient(ellipse at 50% 0%, #252b39, #101218 65%); }
+  main { width: min(100% - 32px, 780px); margin: auto; padding: clamp(28px, 6vw, 64px) 0; }
+  h1 { margin: 0; font-size: clamp(46px, 9vw, 84px); line-height: .96; letter-spacing: -.085em; }
+  header p, footer, #status { color: var(--muted); }
+  header p { margin: 14px 0 24px; }
+  .panel { background: #171a23; border: 1px solid var(--line); border-radius: 22px; overflow: hidden; box-shadow: 0 20px 70px #0005; }
+  .toolbar, .stats, .bottom { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 14px 18px; }
+  .toolbar, .stats { border-bottom: 1px solid var(--line); }
+  .stats { justify-content: flex-start; gap: clamp(18px, 6vw, 44px); }
+  .stat { display: grid; gap: 3px; }
+  .stat span { color: var(--muted); font-size: .76rem; }
+  .stat strong { font: 600 1.25rem ui-monospace, monospace; }
+  button, select { font: inherit; color: inherit; }
+  button, select { border: 1px solid #454c60; border-radius: 9px; background: #272c39; padding: 8px 11px; cursor: pointer; }
+  button:hover, select:hover { background: #353d4f; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #reset { color: #171e0c; background: var(--accent); border-color: var(--accent); font-weight: 750; }
+  #reset:hover { background: #e7ffaf; }
+  #flag-mode[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .board-wrap { overflow: auto; padding: 18px; }
+  #board { display: grid; grid-template-columns: repeat(var(--cols), var(--tile)); gap: 4px; width: max-content; margin: auto; }
+  .cell { width: var(--tile); height: var(--tile); padding: 0; border-radius: 6px; border-color: #3b4356; background: #293143; font: 750 15px ui-monospace, monospace; touch-action: manipulation; }
+  .cell:hover { background: #414e66; }
+  .cell.open { background: #1d222e; border-color: #2b3140; }
+  .cell.mine { color: #ffadad; }
+  .cell.hit { background: #893940; border-color: #eb808a; color: white; }
+  .cell.flag { color: var(--accent); }
+  .cell.wrong { color: #ff9a9a; }
+  .bottom { border-top: 1px solid var(--line); }
+  #status { margin: 0; font-size: .88rem; }
+  footer { margin: 16px 0 0; font-size: .85rem; line-height: 1.5; }
+  @media (max-width: 450px) {
+    .toolbar, .stats, .bottom { padding-inline: 12px; }
+    .board-wrap { padding: 12px; }
+    #board { gap: 3px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Сапёр</h1>
+    <p>Открой все безопасные клетки. Число показывает, сколько мин вокруг.</p>
+  </header>
+  <section class="panel" aria-label="Игра">
+    <div class="toolbar">
+      <label>Сложность
+        <select id="level">
+          <option value="easy">Лёгкая</option>
+          <option value="normal">Средняя</option>
+          <option value="hard">Сложная</option>
+        </select>
+      </label>
+      <button id="reset">Новая игра</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><span>Мин осталось</span><strong id="mines">10</strong></div>
+      <div class="stat"><span>Время</span><strong id="time">0:00</strong></div>
+      <div class="stat"><span>Рекорд</span><strong id="best">—</strong></div>
+    </div>
+    <div class="board-wrap"><div id="board" role="group" aria-label="Минное поле"></div></div>
+    <div class="bottom">
+      <p id="status" role="status">Выбери клетку. Первый ход безопасен.</p>
+      <button id="flag-mode" aria-pressed="false">Режим флагов</button>
+    </div>
+  </section>
+  <footer>Левый клик открывает клетку. Правый клик или F ставит флаг. На телефоне можно включить режим флагов. Стрелки перемещают фокус по полю.</footer>
+</main>
+<script>
+  const levels = {
+    easy: { rows: 9, cols: 9, mines: 10 },
+    normal: { rows: 12, cols: 12, mines: 22 },
+    hard: { rows: 16, cols: 16, mines: 40 }
+  };
+  const colors = ['','#a4bafd','#a4e1ae','#ff9b9b','#c7a8ff','#ffbf8a','#8ae6e2','#f6dfa1','#ffffff'];
+  const byId = id => document.getElementById(id);
+  const board = byId('board');
+  const level = byId('level');
+  const flagMode = byId('flag-mode');
+  let rows, cols, mineCount, cells, buttons, phase, started, timer, flags, opened, focusIndex;
+
+  function formatTime(seconds) {
+    return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+  }
+
+  function elapsed() {
+    return Math.floor((Date.now() - started) / 1000);
+  }
+
+  function recordKey() {
+    return 'minesweeper.best.' + level.value;
+  }
+
+  function readRecord() {
+    try {
+      const result = Number(localStorage.getItem(recordKey()) ?? NaN);
+      return Number.isInteger(result) && result >= 0 ? result : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function showRecord() {
+    const best = readRecord();
+    byId('best').textContent = best === null ? '—' : formatTime(best);
+  }
+
+  function neighbors(index) {
+    const row = Math.floor(index / cols);
+    const col = index % cols;
+    const result = [];
+    for (let y = Math.max(0, row - 1); y <= Math.min(rows - 1, row + 1); y++) {
+      for (let x = Math.max(0, col - 1); x <= Math.min(cols - 1, col + 1); x++) {
+        const next = y * cols + x;
+        if (next !== index) result.push(next);
+      }
+    }
+    return result;
+  }
+
+  function start(first) {
+    const safe = new Set([first, ...neighbors(first)]);
+    const pool = cells.map((_, index) => index).filter(index => !safe.has(index));
+    for (let i = 0; i < mineCount; i++) {
+      const random = i + Math.floor(Math.random() * (pool.length - i));
+      [pool[i], pool[random]] = [pool[random], pool[i]];
+      cells[pool[i]].mine = true;
+    }
+    cells.forEach((cell, index) => {
+      cell.count = neighbors(index).filter(next => cells[next].mine).length;
+    });
+    phase = 'playing';
+    started = Date.now();
+    timer = setInterval(() => { byId('time').textContent = formatTime(elapsed()); }, 200);
+    byId('status').textContent = 'Мины расставлены. Поле открывается по одному ходу.';
+  }
+
+  function renderCell(index) {
+    const cell = cells[index];
+    const button = buttons[index];
+    let label = 'закрыта';
+    button.className = 'cell';
+    button.textContent = '';
+    button.style.color = '';
+    if (cell.open) {
+      button.classList.add('open');
+      label = cell.count ? 'мин вокруг: ' + cell.count : 'пустая';
+      if (cell.count) {
+        button.textContent = cell.count;
+        button.style.color = colors[cell.count];
+      }
+    }
+    if (phase === 'lost' && cell.mine && (!cell.flag || cell.hit)) {
+      button.classList.add('open', 'mine');
+      if (cell.hit) button.classList.add('hit');
+      button.textContent = '✹';
+      label = 'мина';
+    } else if (cell.flag) {
+      const wrong = phase === 'lost' && !cell.mine;
+      button.classList.add(wrong ? 'wrong' : 'flag');
+      button.textContent = wrong ? '×' : '⚑';
+      label = wrong ? 'ошибочный флаг' : 'флаг';
+    }
+    button.setAttribute('aria-label', (Math.floor(index / cols) + 1) + ', ' + (index % cols + 1) + ' — ' + label);
+  }
+
+  function finish(won) {
+    phase = won ? 'won' : 'lost';
+    clearInterval(timer);
+    const seconds = elapsed();
+    byId('time').textContent = formatTime(seconds);
+    if (won) {
+      const best = readRecord();
+      if (best === null || seconds < best) {
+        try { localStorage.setItem(recordKey(), seconds); } catch { /* Рекорд недоступен. */ }
+      }
+      cells.forEach(cell => { if (cell.mine) cell.flag = true; });
+      flags = mineCount;
+      byId('mines').textContent = 0;
+      showRecord();
+    }
+    cells.forEach((_, index) => renderCell(index));
+    byId('status').textContent = won ? 'Победа! Все безопасные клетки открыты.' : 'Ты открыл мину. Попробуй ещё раз.';
+  }
+
+  function reveal(index) {
+    if (phase === 'won' || phase === 'lost' || cells[index].flag || cells[index].open) return;
+    if (phase === 'ready') start(index);
+    if (cells[index].mine) {
+      cells[index].hit = true;
+      finish(false);
+      return;
+    }
+    const queue = [index];
+    while (queue.length) {
+      const next = queue.pop();
+      const cell = cells[next];
+      if (cell.open || cell.flag || cell.mine) continue;
+      cell.open = true;
+      opened++;
+      renderCell(next);
+      if (cell.count === 0) queue.push(...neighbors(next));
+    }
+    if (opened === cells.length - mineCount) finish(true);
+  }
+
+  function toggleFlag(index) {
+    const cell = cells[index];
+    if (phase === 'won' || phase === 'lost' || cell.open) return;
+    if (!cell.flag && flags === mineCount) return;
+    cell.flag = !cell.flag;
+    flags += cell.flag ? 1 : -1;
+    byId('mines').textContent = mineCount - flags;
+    renderCell(index);
+  }
+
+  function focusCell(index) {
+    buttons[focusIndex].tabIndex = -1;
+    focusIndex = index;
+    buttons[index].tabIndex = 0;
+  }
+
+  function handleKeys(event, index) {
+    if (event.code === 'KeyF') {
+      event.preventDefault();
+      if (!event.repeat) toggleFlag(index);
+      return;
+    }
+    const moves = {
+      ArrowLeft: index % cols > 0 ? index - 1 : index,
+      ArrowRight: index % cols < cols - 1 ? index + 1 : index,
+      ArrowUp: index >= cols ? index - cols : index,
+      ArrowDown: index < cells.length - cols ? index + cols : index
+    };
+    if (!Object.hasOwn(moves, event.key)) return;
+    event.preventDefault();
+    buttons[moves[event.key]].focus();
+  }
+
+  function reset() {
+    clearInterval(timer);
+    ({ rows, cols, mines: mineCount } = levels[level.value]);
+    phase = 'ready';
+    flags = opened = focusIndex = 0;
+    cells = Array.from({ length: rows * cols }, () => ({ open: false, flag: false, mine: false, hit: false, count: 0 }));
+    byId('time').textContent = '0:00';
+    byId('mines').textContent = mineCount;
+    byId('status').textContent = 'Выбери клетку. Первый ход безопасен.';
+    flagMode.setAttribute('aria-pressed', 'false');
+    showRecord();
+    board.style.setProperty('--cols', cols);
+    board.style.setProperty('--tile', cols === 9 ? 'clamp(25px, 7vw, 42px)' : 'clamp(27px, 5vw, 40px)');
+    buttons = cells.map((_, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.tabIndex = index === 0 ? 0 : -1;
+      button.addEventListener('focus', () => focusCell(index));
+      button.addEventListener('click', () => {
+        if (flagMode.getAttribute('aria-pressed') === 'true') toggleFlag(index);
+        else reveal(index);
+      });
+      button.addEventListener('contextmenu', event => {
+        event.preventDefault();
+        toggleFlag(index);
+      });
+      button.addEventListener('keydown', event => handleKeys(event, index));
+      return button;
+    });
+    board.replaceChildren(...buttons);
+    cells.forEach((_, index) => renderCell(index));
+  }
+
+  flagMode.addEventListener('click', () => {
+    flagMode.setAttribute('aria-pressed', String(flagMode.getAttribute('aria-pressed') !== 'true'));
+  });
+  byId('reset').addEventListener('click', reset);
+  level.addEventListener('change', reset);
+  reset();
+</script>
+</body>
+</html>
